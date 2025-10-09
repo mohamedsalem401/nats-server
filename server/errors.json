@@ -2058,5 +2058,15 @@
     "help": "",
     "url": "",
     "deprecates": ""
+  },
+  {
+    "constant": "JSMirrorWithBatchPublishErr",
+    "code": 400,
+    "error_code": 10208,
+    "description": "stream mirrors can not also use batch publishing",
+    "comment": "",
+    "help": "",
+    "url": "",
+    "deprecates": ""
   }
 ]

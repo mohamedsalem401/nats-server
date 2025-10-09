@@ -1753,6 +1753,9 @@ func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account, pedantic boo
 		if cfg.AllowAtomicPublish {
 			return StreamConfig{}, NewJSMirrorWithAtomicPublishError()
 		}
+		if cfg.AllowBatchPublish {
+			return StreamConfig{}, NewJSMirrorWithBatchPublishError()
+		}
 		if cfg.AllowMsgSchedules {
 			return StreamConfig{}, NewJSMirrorWithMsgSchedulesError()
 		}
@@ -3376,6 +3379,10 @@ func (mset *stream) setupMirrorConsumer() error {
 						hdr = removeHeaderIfPrefixPresent(hdr, "Nats-Expected-")
 						// Remove any Nats-Batch- headers, batching is not supported when mirroring.
 						hdr = removeHeaderIfPrefixPresent(hdr, "Nats-Batch-")
+						// Remove any Nats-Fast-Batch- headers, batching is not supported when mirroring.
+						hdr = removeHeaderIfPrefixPresent(hdr, "Nats-Fast-Batch-")
+						// Remove any Nats-Flow headers, batching is not supported when mirroring.
+						hdr = removeHeaderIfPresent(hdr, "Nats-Flow")
 					}
 					mset.queueInbound(msgs, subject, reply, hdr, msg, nil, nil)
 					mirror.last.Store(time.Now().UnixNano())
@@ -3958,6 +3965,10 @@ func (mset *stream) processInboundSourceMsg(si *sourceInfo, m *inMsg) bool {
 		hdr = removeHeaderIfPrefixPresent(hdr, "Nats-Expected-")
 		// Remove any Nats-Batch- headers, batching is not supported when sourcing.
 		hdr = removeHeaderIfPrefixPresent(hdr, "Nats-Batch-")
+		// Remove any Nats-Fast-Batch- headers, batching is not supported when sourcing.
+		hdr = removeHeaderIfPrefixPresent(hdr, "Nats-Fast-Batch-")
+		// Remove any Nats-Flow headers, batching is not supported when sourcing.
+		hdr = removeHeaderIfPresent(hdr, "Nats-Flow")
 	}
 	// Hold onto the origin reply which has all the metadata.
 	hdr = genHeader(hdr, JSStreamSource, si.genSourceHeader(m.subj, m.rply))
