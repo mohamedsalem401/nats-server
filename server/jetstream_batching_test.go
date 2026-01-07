@@ -3122,11 +3122,11 @@ func TestJetStreamFastBatchPublishGapDetection(t *testing.T) {
 		rmsg, err := sub.NextMsg(time.Second)
 		require_NoError(t, err)
 
-		if gapMode == _EMPTY_ || gapMode == "unknown" {
+		if gapMode == "unknown" {
 			pubAck = JSPubAckResponse{}
 			require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
 			require_NotNil(t, pubAck.Error)
-			require_Error(t, pubAck.Error, NewJSBatchPublishInvalidGapModeError())
+			require_Error(t, pubAck.Error, NewJSBatchPublishInvalidPatternError())
 			return
 		}
 
@@ -3179,7 +3179,7 @@ func TestJetStreamFastBatchPublishGapDetection(t *testing.T) {
 	for _, storage := range []StorageType{FileStorage, MemoryStorage} {
 		for _, retention := range []RetentionPolicy{LimitsPolicy, InterestPolicy, WorkQueuePolicy} {
 			for _, replicas := range []int{1, 3} {
-				for _, gapMode := range []string{_EMPTY_, "fail", "ok", "unknown"} {
+				for _, gapMode := range []string{"fail", "ok", "unknown"} {
 					t.Run(fmt.Sprintf("%s/%s/R%d/%s", storage, retention, replicas, gapMode), func(t *testing.T) {
 						test(t, storage, retention, replicas, gapMode)
 					})

@@ -41,9 +41,6 @@ const (
 	// JSBatchPublishInvalidBatchIDErr batch publish ID is invalid
 	JSBatchPublishInvalidBatchIDErr ErrorIdentifier = 10205
 
-	// JSBatchPublishInvalidGapModeErr batch publish gap mode is invalid
-	JSBatchPublishInvalidGapModeErr ErrorIdentifier = 10207
-
 	// JSBatchPublishInvalidPatternErr batch publish pattern is invalid
 	JSBatchPublishInvalidPatternErr ErrorIdentifier = 10204
 
@@ -369,7 +366,7 @@ const (
 	JSMirrorWithAtomicPublishErr ErrorIdentifier = 10198
 
 	// JSMirrorWithBatchPublishErr stream mirrors can not also use batch publishing
-	JSMirrorWithBatchPublishErr ErrorIdentifier = 10208
+	JSMirrorWithBatchPublishErr ErrorIdentifier = 10207
 
 	// JSMirrorWithCountersErr stream mirrors can not also calculate counters
 	JSMirrorWithCountersErr ErrorIdentifier = 10173
@@ -641,7 +638,6 @@ var (
 		JSBadRequestErr:                              {Code: 400, ErrCode: 10003, Description: "bad request"},
 		JSBatchPublishDisabledErr:                    {Code: 400, ErrCode: 10203, Description: "batch publish is disabled"},
 		JSBatchPublishInvalidBatchIDErr:              {Code: 400, ErrCode: 10205, Description: "batch publish ID is invalid"},
-		JSBatchPublishInvalidGapModeErr:              {Code: 400, ErrCode: 10207, Description: "batch publish gap mode is invalid"},
 		JSBatchPublishInvalidPatternErr:              {Code: 400, ErrCode: 10204, Description: "batch publish pattern is invalid"},
 		JSBatchPublishUnknownBatchIDErr:              {Code: 400, ErrCode: 10206, Description: "batch publish ID unknown"},
 		JSClusterIncompleteErr:                       {Code: 503, ErrCode: 10004, Description: "incomplete results"},
@@ -750,7 +746,7 @@ var (
 		JSMirrorMultipleFiltersNotAllowed:            {Code: 400, ErrCode: 10150, Description: "mirror with multiple subject transforms cannot also have a single subject filter"},
 		JSMirrorOverlappingSubjectFilters:            {Code: 400, ErrCode: 10152, Description: "mirror subject filters can not overlap"},
 		JSMirrorWithAtomicPublishErr:                 {Code: 400, ErrCode: 10198, Description: "stream mirrors can not also use atomic publishing"},
-		JSMirrorWithBatchPublishErr:                  {Code: 400, ErrCode: 10208, Description: "stream mirrors can not also use batch publishing"},
+		JSMirrorWithBatchPublishErr:                  {Code: 400, ErrCode: 10207, Description: "stream mirrors can not also use batch publishing"},
 		JSMirrorWithCountersErr:                      {Code: 400, ErrCode: 10173, Description: "stream mirrors can not also calculate counters"},
 		JSMirrorWithFirstSeqErr:                      {Code: 400, ErrCode: 10143, Description: "stream mirrors can not have first sequence configured"},
 		JSMirrorWithMsgSchedulesErr:                  {Code: 400, ErrCode: 10186, Description: "stream mirrors can not also schedule messages"},
@@ -991,16 +987,6 @@ func NewJSBatchPublishInvalidBatchIDError(opts ...ErrorOption) *ApiError {
 	}
 
 	return ApiErrors[JSBatchPublishInvalidBatchIDErr]
-}
-
-// NewJSBatchPublishInvalidGapModeError creates a new JSBatchPublishInvalidGapModeErr error: "batch publish gap mode is invalid"
-func NewJSBatchPublishInvalidGapModeError(opts ...ErrorOption) *ApiError {
-	eopts := parseOpts(opts)
-	if ae, ok := eopts.err.(*ApiError); ok {
-		return ae
-	}
-
-	return ApiErrors[JSBatchPublishInvalidGapModeErr]
 }
 
 // NewJSBatchPublishInvalidPatternError creates a new JSBatchPublishInvalidPatternErr error: "batch publish pattern is invalid"

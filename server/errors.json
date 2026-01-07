@@ -2050,19 +2050,9 @@
     "deprecates": ""
   },
   {
-    "constant": "JSBatchPublishInvalidGapModeErr",
-    "code": 400,
-    "error_code": 10207,
-    "description": "batch publish gap mode is invalid",
-    "comment": "",
-    "help": "",
-    "url": "",
-    "deprecates": ""
-  },
-  {
     "constant": "JSMirrorWithBatchPublishErr",
     "code": 400,
-    "error_code": 10208,
+    "error_code": 10207,
     "description": "stream mirrors can not also use batch publishing",
     "comment": "",
     "help": "",

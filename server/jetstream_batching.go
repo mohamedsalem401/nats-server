@@ -121,7 +121,7 @@ func (b *batchGroup) readyForCommit() bool {
 
 // fastBatchRegisterSequences registers the highest stored batch and stream sequence and returns
 // whether a PubAck should be sent if the batch has been committed.
-// TODO(mvv): docs about flow acks
+// Also returns whether a flow control message should be sent.
 // Lock should be held.
 func (batches *batching) fastBatchRegisterSequences(batchId string, batchSeq, streamSeq uint64) (*batchGroup, bool, string) {
 	if b, ok := batches.group[batchId]; ok {
