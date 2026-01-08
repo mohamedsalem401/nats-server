@@ -4996,36 +4996,41 @@ const (
 )
 
 var seq uint64
-var b = FastBatch{
-	id: "id",
-	flow: 500,
-	gapOk: false,
-}
+//var b = FastBatch{
+//	id: "id",
+//	flow: 500,
+//	gapOk: false,
+//}
 
 // getFastBatch gets fast batch info from the reply subject in the form:
 // <prefix>.<uuid>.<initial flow>.<gap mode>.<batch seq>.<operation>.$FI
-func getFastBatch(reply string) (FastBatch, bool) {
+func getFastBatch(reply string) (*FastBatch, bool) {
 	if len(reply) == 0 || !strings.HasSuffix(reply, FastBatchSuffix) {
-		return FastBatch{}, false
+		return nil, false
 	}
 
+	//var b = FastBatch{}
+	//b.id = "batch"
+	//b.flow = 500
 	//b.seq = seq / 2 + 1
 	//seq++
 	//if b.seq == 2_000_000 {
 	//	b.commit = true
 	//}
-	//return b, true
+	//return &b, true
+
+	var b = FastBatch{}
 
 	n := len(reply) - 4 // Move to just before the dot
 	o := strings.LastIndexByte(reply[:n], '.')
 	if o == -1 {
-		return FastBatch{}, false
+		return nil, false
 	}
 	// Batch operation.
 	ops := reply[o+1 : n]
 	op := parseInt64(stringToBytes(ops))
 	if op < FastBatchOpStart || op > FastBatchOpCommitEob {
-		return FastBatch{}, false
+		return nil, false
 	}
 
 	b.commitEob = op == FastBatchOpCommitEob
@@ -5033,38 +5038,38 @@ func getFastBatch(reply string) (FastBatch, bool) {
 	p := o
 	// Batch seq.
 	if o = strings.LastIndexByte(reply[:o], '.'); o == -1 {
-		return FastBatch{}, false
+		return nil, false
 	} else {
 		a := parseInt64(stringToBytes(reply[o+1:p]))
 		if a < 1 {
-			return FastBatch{}, false
+			return nil, false
 		}
 		b.seq = uint64(a)
 		//b.seq, _ = strconv.ParseUint(reply[o+1:p], 10, 64)
 		p = o
 		if b.seq <= 0 {
-			return FastBatch{}, false
+			return nil, false
 		}
 		if op == FastBatchOpStart && b.seq != 1 {
-			return FastBatch{}, false
+			return nil, false
 		} else if op == FastBatchOpAppend && b.seq <= 1 {
-			return FastBatch{}, false
+			return nil, false
 		}
 	}
 	// Gap mode.
 	if o = strings.LastIndexByte(reply[:o], '.'); o == -1 {
-		return FastBatch{}, false
+		return nil, false
 	} else {
 		gapMode := reply[o+1 : p]
 		if gapMode != FastBatchGapFail && gapMode != FastBatchGapOk {
-			return FastBatch{}, false // Not recognized.
+			return nil, false // Not recognized.
 		}
 		b.gapOk = gapMode == FastBatchGapOk
 		p = o
 	}
 	// Ack flow.
 	if o = strings.LastIndexByte(reply[:o], '.'); o == -1 {
-		return FastBatch{}, false
+		return nil, false
 	} else {
 		a := parseInt64(stringToBytes(reply[o+1:p]))
 		if a <= 0 {
@@ -5079,7 +5084,7 @@ func getFastBatch(reply string) (FastBatch, bool) {
 	}
 	// Batch id.
 	if o = strings.LastIndexByte(reply[:o], '.'); o == -1 {
-		return FastBatch{}, false
+		return nil, false
 	} else {
 		b.id = reply[o+1 : p]
 	}
@@ -5089,7 +5094,7 @@ func getFastBatch(reply string) (FastBatch, bool) {
 	if b.seq == 2_000_000 {
 		b.commit = true
 	}
-	return b, true
+	return &b, true
 }
 
 // Fast lookup of batch sequence.
