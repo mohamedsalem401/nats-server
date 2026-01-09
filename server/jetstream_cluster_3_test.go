@@ -6479,9 +6479,11 @@ func TestJetStreamClusterDurableStreamMirror(t *testing.T) {
 		_, err = jsStreamCreate(t, nc, &StreamConfig{
 			Name: "M",
 			Mirror: &StreamSource{
-				Name:                   "O",
-				ConsumerName:           "C",
-				ConsumerDeliverSubject: "deliver-subject",
+				Name: "O",
+				Consumer: &StreamConsumerSource{
+					Name:           "C",
+					DeliverSubject: "deliver-subject",
+				},
 			},
 			Storage:  FileStorage,
 			Replicas: replicas,
@@ -6553,9 +6555,11 @@ func TestJetStreamClusterDurableStreamSource(t *testing.T) {
 		_, err = jsStreamCreate(t, nc, &StreamConfig{
 			Name: "S",
 			Sources: []*StreamSource{{
-				Name:                   "O",
-				ConsumerName:           "C",
-				ConsumerDeliverSubject: "deliver-subject",
+				Name: "O",
+				Consumer: &StreamConsumerSource{
+					Name:           "C",
+					DeliverSubject: "deliver-subject",
+				},
 			}},
 			Storage:  FileStorage,
 			Replicas: replicas,

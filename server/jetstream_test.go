@@ -22147,9 +22147,11 @@ func TestJetStreamDurableStreamMirrorAndSourceIncorrectConsumerConfig(t *testing
 	_, err = jsStreamCreate(t, nc, &StreamConfig{
 		Name: "M",
 		Mirror: &StreamSource{
-			Name:                   "O",
-			ConsumerName:           "C",
-			ConsumerDeliverSubject: "deliver-subject",
+			Name: "O",
+			Consumer: &StreamConsumerSource{
+				Name:           "C",
+				DeliverSubject: "deliver-subject",
+			},
 		},
 		Storage: FileStorage,
 	})
@@ -22175,9 +22177,11 @@ func TestJetStreamDurableStreamMirrorAndSourceIncorrectConsumerConfig(t *testing
 	_, err = jsStreamCreate(t, nc, &StreamConfig{
 		Name: "S",
 		Sources: []*StreamSource{{
-			Name:                   "O",
-			ConsumerName:           "C",
-			ConsumerDeliverSubject: "deliver-subject",
+			Name: "O",
+			Consumer: &StreamConsumerSource{
+				Name:           "C",
+				DeliverSubject: "deliver-subject",
+			},
 		}},
 		Storage: FileStorage,
 	})
