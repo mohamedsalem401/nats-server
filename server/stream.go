@@ -282,10 +282,11 @@ type BatchFlowAck struct {
 	LastSequence uint64 `json:"last_seq,omitempty"`
 	// CurrentSequence is the sequence of the message that triggered the ack
 	CurrentSequence uint64 `json:"seq,omitempty"`
+	// FlowSequence is the sequence of when AckMessages was last updated.
+	// A change in AckMessages will be represented by a change in this sequence.
+	FlowSequence uint64 `json:"flow_seq,omitempty"`
 	// AckMessages indicates the active per-message frequency of Flow Acks
-	AckMessages uint64 `json:"messages,omitempty"`
-	//// AckBytes indicates the active per-bytes frequency of Flow Acks in unit of bytes
-	//AckBytes int64 `json:"bytes,omitempty"`
+	AckMessages uint64 `json:"ack_msgs,omitempty"`
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -5105,11 +5106,11 @@ func getFastBatch(reply string) (*FastBatch, bool) {
 	}
 
 	//b.seq = seq / 2 + 1
-	b.seq = seq + 1
-	seq++
-	if b.seq == 5_000_000 {
-		b.commit = true
-	}
+	//b.seq = seq + 1
+	//seq++
+	//if b.seq == 5_000_000 {
+	//	b.commit = true
+	//}
 	return b, false
 }
 
@@ -6915,9 +6916,10 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 		return err
 	}
 
-	if !allowBatchPublish {
-		return respondError(NewJSBatchPublishDisabledError())
-	}
+	_ = allowBatchPublish
+	//if !allowBatchPublish {
+	//	return respondError(NewJSBatchPublishDisabledError())
+	//}
 
 	if batch == nil {
 		return respondError(NewJSBatchPublishInvalidPatternError())

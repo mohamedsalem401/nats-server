@@ -47,6 +47,7 @@ type batchGroup struct {
 	// Used for fast batch publish.
 	pseq        uint64 // Last persisted batch sequence.
 	sseq        uint64 // Last persisted stream sequence.
+	fseq        uint64 // Sequence that the flow is based on. Updates to a new sequence when ackMessages gets updated.
 	ackMessages uint64 // Ack will be sent every N messages.
 	gapOk       bool   // Whether a gap is okay, if not the batch would be rejected.
 	reply       string // If the batch is committed, this is the reply subject used for the PubAck.
@@ -67,7 +68,8 @@ func (batches *batching) newAtomicBatchGroup(mset *stream, batchId string) (*bat
 // newFastBatchGroup creates a fast batch publish group.
 // Lock should be held.
 func (batches *batching) newFastBatchGroup(mset *stream, batchId string, gapOk bool, ackMessages uint64) *batchGroup {
-	b := &batchGroup{gapOk: gapOk, ackMessages: ackMessages}
+	//b := &batchGroup{gapOk: gapOk, ackMessages: ackMessages}
+	b := &batchGroup{gapOk: gapOk, ackMessages: 1}
 	b.setupCleanupTimer(mset, batchId, batches)
 	return b
 }
@@ -135,7 +137,18 @@ func (batches *batching) fastBatchRegisterSequences(batchId string, batchSeq, st
 			return b, true, b.reply
 		}
 		// If not committing, send flow ack when we've reached the ack threshold.
-		return b, batchSeq%b.ackMessages == 0, _EMPTY_
+		flowRespond := (batchSeq-b.fseq)%b.ackMessages == 0
+
+		// Check if we should allow ramping up or slowing down the flow of messages.
+		if flowRespond && b.ackMessages < 500 {
+			b.ackMessages *= 2
+			if b.ackMessages > 500 {
+				b.ackMessages = 500
+			}
+			b.fseq = batchSeq
+			//fmt.Printf("flow ack: %d, %d\n", b.fseq, b.ackMessages)
+		}
+		return b, flowRespond, _EMPTY_
 	}
 	return nil, false, _EMPTY_
 }
@@ -146,7 +159,11 @@ func (b *batchGroup) fastBatchFlowControl(batchSeq uint64, mset *stream, reply s
 	if len(reply) == 0 {
 		return
 	}
-	response, _ := json.Marshal(&BatchFlowAck{AckMessages: b.ackMessages, CurrentSequence: batchSeq})
+	response, _ := json.Marshal(&BatchFlowAck{
+		CurrentSequence: batchSeq,
+		FlowSequence:    b.fseq,
+		AckMessages:     b.ackMessages,
+	})
 	mset.outq.sendMsg(reply, response)
 }
 
