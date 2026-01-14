@@ -140,13 +140,27 @@ func (batches *batching) fastBatchRegisterSequences(batchId string, batchSeq, st
 		flowRespond := (batchSeq-b.fseq)%b.ackMessages == 0
 
 		// Check if we should allow ramping up or slowing down the flow of messages.
-		if flowRespond && b.ackMessages < 500 {
-			b.ackMessages *= 2
-			if b.ackMessages > 500 {
-				b.ackMessages = 500
+		if flowRespond {
+			maxAckMessages := uint64(500 / len(batches.fast))
+			if maxAckMessages < 1 {
+				maxAckMessages = 1
 			}
-			b.fseq = batchSeq
-			//fmt.Printf("flow ack: %d, %d\n", b.fseq, b.ackMessages)
+
+			if b.ackMessages < maxAckMessages {
+				// Ramp up.
+				b.ackMessages *= 2
+				if b.ackMessages > maxAckMessages {
+					b.ackMessages = maxAckMessages
+				}
+				b.fseq = batchSeq
+			} else if b.ackMessages > maxAckMessages {
+				// Slow down.
+				b.ackMessages /= 2
+				if b.ackMessages <= maxAckMessages {
+					b.ackMessages = maxAckMessages
+				}
+				b.fseq = batchSeq
+			}
 		}
 		return b, flowRespond, _EMPTY_
 	}
