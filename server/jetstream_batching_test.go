@@ -3393,3 +3393,221 @@ func TestJetStreamFastBatchPublishSourceAndMirror(t *testing.T) {
 	t.Run("R1", func(t *testing.T) { test(t, 1) })
 	t.Run("R3", func(t *testing.T) { test(t, 3) })
 }
+
+func TestJetStreamFastBatchPublishDuplicates(t *testing.T) {
+	test := func(
+		t *testing.T,
+		storage StorageType,
+		retention RetentionPolicy,
+		replicas int,
+	) {
+		c := createJetStreamClusterExplicit(t, "R3S", 3)
+		defer c.shutdown()
+
+		nc := clientConnectToServer(t, c.randomServer())
+		defer nc.Close()
+
+		var batchFlowAck BatchFlowAck
+		var pubAck JSPubAckResponse
+
+		_, err := jsStreamCreate(t, nc, &StreamConfig{
+			Name:              "TEST",
+			Subjects:          []string{"foo"},
+			Storage:           storage,
+			Retention:         retention,
+			Replicas:          replicas,
+			AllowBatchPublish: true,
+		})
+		require_NoError(t, err)
+
+		inbox := nats.NewInbox()
+		sub, err := nc.SubscribeSync(fmt.Sprintf("%s.>", inbox))
+		require_NoError(t, err)
+		defer sub.Drain()
+
+		// Simulate storing a duplicate message.
+		msgId := "msgId"
+		sl := c.streamLeader(globalAccountName, "TEST")
+		require_NotNil(t, sl)
+		mset, err := sl.globalAccount().lookupStream("TEST")
+		require_NoError(t, err)
+		dseq := uint64(1)
+		// If replicated, we simulate it being proposed still.
+		if replicas > 1 {
+			dseq = 0
+		}
+		mset.storeMsgId(&ddentry{msgId, dseq, 0})
+
+		// Publish a "batch" which immediately commits.
+		m := nats.NewMsg("foo")
+		m.Header.Set(JSMsgId, msgId)
+		m.Reply = generateFastBatchReply(inbox, "uuid", 1, 0, FastBatchGapFail, FastBatchOpCommit)
+		require_NoError(t, nc.PublishMsg(m))
+		// The PubAck comes in immediately without an intermediate BatchFlowAck.
+		rmsg, err := sub.NextMsg(time.Second)
+		require_NoError(t, err)
+		pubAck = JSPubAckResponse{}
+		require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
+		if replicas == 1 {
+			require_True(t, pubAck.Error == nil)
+			require_Equal(t, pubAck.Sequence, 1)
+			require_True(t, pubAck.Duplicate)
+			require_Equal(t, pubAck.BatchId, "uuid")
+			require_Equal(t, pubAck.BatchSize, 1)
+		} else {
+			require_True(t, pubAck.Error != nil)
+			require_Equal(t, pubAck.Error.Error(), NewJSStreamDuplicateMessageConflictError().Error())
+		}
+		mset.mu.RLock()
+		fastBatches := len(mset.batches.fast)
+		mset.mu.RUnlock()
+		require_Len(t, fastBatches, 0)
+
+		// Flow setting so we get one flow control message below.
+		flow := uint64(3)
+
+		// Publish a batch of N messages that are all duplicates, we expect
+		// to receive both a flow control message and pub ack.
+		for seq, batch := uint64(1), uint64(5); seq <= batch; seq++ {
+			if seq == batch {
+				m.Reply = generateFastBatchReply(inbox, "uuid", seq, flow, FastBatchGapFail, FastBatchOpCommit)
+			} else if seq == 1 {
+				m.Reply = generateFastBatchReply(inbox, "uuid", seq, flow, FastBatchGapFail, FastBatchOpStart)
+			} else {
+				m.Reply = generateFastBatchReply(inbox, "uuid", seq, flow, FastBatchGapFail, FastBatchOpAppend)
+			}
+			require_NoError(t, nc.PublishMsg(m))
+
+			// Can already pre-check receiving the first flow control message.
+			if seq == 1 {
+				rmsg, err = sub.NextMsg(time.Second)
+				require_NoError(t, err)
+				batchFlowAck = BatchFlowAck{}
+				require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
+				require_Equal(t, batchFlowAck.AckMessages, flow)
+			}
+
+			// Expect one flow control message for this batch.
+			if seq%flow == 0 {
+				rmsg, err = sub.NextMsg(time.Second)
+				require_NoError(t, err)
+				batchFlowAck = BatchFlowAck{}
+				require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
+				require_Equal(t, batchFlowAck.CurrentSequence, 3)
+				require_Equal(t, batchFlowAck.AckMessages, flow)
+			}
+		}
+		// Should receive the PubAck upon commit.
+		rmsg, err = sub.NextMsg(time.Second)
+		require_NoError(t, err)
+		pubAck = JSPubAckResponse{}
+		require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
+		if replicas == 1 {
+			require_True(t, pubAck.Error == nil)
+			require_Equal(t, pubAck.Sequence, 1)
+			require_True(t, pubAck.Duplicate)
+			require_Equal(t, pubAck.BatchId, "uuid")
+			require_Equal(t, pubAck.BatchSize, 5)
+		} else {
+			require_True(t, pubAck.Error != nil)
+			require_Equal(t, pubAck.Error.Error(), NewJSStreamDuplicateMessageConflictError().Error())
+		}
+		mset.mu.RLock()
+		fastBatches = len(mset.batches.fast)
+		mset.mu.RUnlock()
+		require_Len(t, fastBatches, 0)
+	}
+
+	for _, storage := range []StorageType{FileStorage, MemoryStorage} {
+		for _, retention := range []RetentionPolicy{LimitsPolicy, InterestPolicy, WorkQueuePolicy} {
+			for _, replicas := range []int{1, 3} {
+				t.Run(fmt.Sprintf("%s/%s/R%d", storage, retention, replicas), func(t *testing.T) {
+					test(t, storage, retention, replicas)
+				})
+			}
+		}
+	}
+}
+
+func TestJetStreamFastBatchPublishDuplicatesCluster(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc := clientConnectToServer(t, s)
+	defer nc.Close()
+
+	var batchFlowAck BatchFlowAck
+	var pubAck JSPubAckResponse
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{
+		Name:              "TEST",
+		Subjects:          []string{"foo"},
+		Storage:           FileStorage,
+		AllowBatchPublish: true,
+	})
+	require_NoError(t, err)
+
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(fmt.Sprintf("%s.>", inbox))
+	require_NoError(t, err)
+	defer sub.Drain()
+
+	msgId := "msgId"
+	m := nats.NewMsg("foo")
+	m.Header.Set(JSMsgId, msgId)
+	m.Reply = generateFastBatchReply(inbox, "uuid", 1, 4, FastBatchGapFail, FastBatchOpStart)
+	require_NoError(t, nc.PublishMsg(m))
+	rmsg, err := sub.NextMsg(time.Second)
+	require_NoError(t, err)
+	batchFlowAck = BatchFlowAck{}
+	require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
+	require_Equal(t, batchFlowAck.AckMessages, 4)
+
+	mset, err := s.globalAccount().lookupStream("TEST")
+	require_NoError(t, err)
+	mset.mu.Lock()
+	batches := mset.batches
+	mset.mu.Unlock()
+	require_NotNil(t, batches)
+
+	batches.mu.Lock()
+	b := batches.fast["uuid"]
+
+	// Simulate a pending message that will take some time to be processed due to replication.
+	b.lseq++
+	b.pending++
+
+	// Simulate a bunch of messages being marked as duplicate and not being accounted for.
+	// These two would trigger the first ack.
+	b.lseq += 2
+	// These would trigger the second ack.
+	b.lseq += 4
+
+	// Now simulate the second message we published is processed.
+	reply := generateFastBatchReply(inbox, "uuid", 2, 4, FastBatchGapFail, FastBatchOpAppend)
+	batches.fastBatchRegisterSequences(mset, reply, "uuid", 2, 2)
+	batches.mu.Unlock()
+
+	// We now expect to receive two flow control messages.
+	for _, cseq := range []uint64{4, 8} {
+		rmsg, err = sub.NextMsg(time.Second)
+		require_NoError(t, err)
+		batchFlowAck = BatchFlowAck{}
+		require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
+		require_Equal(t, batchFlowAck.AckMessages, 4)
+		require_Equal(t, batchFlowAck.CurrentSequence, cseq)
+	}
+
+	// Now commit the batch (but this message is also a duplicate).
+	m.Reply = generateFastBatchReply(inbox, "uuid", 9, 0, FastBatchGapFail, FastBatchOpCommit)
+	require_NoError(t, nc.PublishMsg(m))
+	rmsg, err = sub.NextMsg(time.Second)
+	require_NoError(t, err)
+	pubAck = JSPubAckResponse{}
+	require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
+	require_True(t, pubAck.Error == nil)
+	require_Equal(t, pubAck.Sequence, 1)
+	require_True(t, pubAck.Duplicate)
+	require_Equal(t, pubAck.BatchId, "uuid")
+	require_Equal(t, pubAck.BatchSize, 9)
+}

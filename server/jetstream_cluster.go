@@ -9045,7 +9045,7 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 			var resp = &JSPubAckResponse{PubAck: &PubAck{Stream: name}}
 			resp.Error = apiErr
 			response, _ = json.Marshal(resp)
-			outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, nil, response, nil, 0))
+			outq.sendMsg(reply, response)
 		}
 		return err
 	}

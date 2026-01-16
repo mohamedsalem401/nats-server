@@ -47,11 +47,12 @@ type batchGroup struct {
 	// Used for fast batch publish.
 	pseq           uint64 // Last persisted batch sequence.
 	sseq           uint64 // Last persisted stream sequence.
-	fseq           uint64 // Sequence that the flow is based on. Updates to a new sequence when ackMessages gets updated.
+	pending        uint64 // Number of pending messages in the batch waiting to be persisted.
+	fseq           uint64 // Sequence of when we last sent a flow message.
 	ackMessages    uint64 // Ack will be sent every N messages.
 	maxAckMessages uint64 // Maximum ackMessages value the client allows.
 	gapOk          bool   // Whether a gap is okay, if not the batch would be rejected.
-	reply          string // If the batch is committed, this is the reply subject used for the PubAck.
+	commit         bool   // If the batch is committed.
 }
 
 // newAtomicBatchGroup creates an atomic batch publish group.
@@ -131,23 +132,45 @@ func (b *batchGroup) readyForCommit() bool {
 
 // fastBatchRegisterSequences registers the highest stored batch and stream sequence and returns
 // whether a PubAck should be sent if the batch has been committed.
-// Also returns whether a flow control message should be sent.
 // Lock should be held.
-func (batches *batching) fastBatchRegisterSequences(batchId string, batchSeq, streamSeq uint64) (*batchGroup, bool, string) {
+func (batches *batching) fastBatchRegisterSequences(mset *stream, reply string, batchId string, batchSeq, streamSeq uint64) bool {
 	if b, ok := batches.fast[batchId]; ok {
+		if b.pending > 0 {
+			b.pending--
+		}
 		b.sseq = streamSeq
-		b.pseq = batchSeq
+		// Store last persisted batch sequence.
+		// If we have no remaining pending writes, we might have had duplicate messages
+		// and need to send additional flow control messages.
+		if b.pending == 0 {
+			b.pseq = b.lseq
+		} else {
+			b.pseq = batchSeq
+		}
 		// If the PubAck needs to be sent now as a result of a commit.
 		// Return the reply and clean up the batch now.
-		if b.lseq == batchSeq && b.reply != _EMPTY_ {
+		if b.lseq == b.pseq && b.commit {
 			b.cleanupLocked(batchId, batches)
-			return b, true, b.reply
+			return true
 		}
-		// If not committing, send flow ack when we've reached the ack threshold.
-		flowRespond := (batchSeq-b.fseq)%b.ackMessages == 0
+		b.fastBatchUpdateFlowControl(mset, reply, batches)
+		return false
+	}
+	return false
+}
 
-		// Check if we should allow ramping up or slowing down the flow of messages.
-		if flowRespond {
+// fastBatchUpdateFlowControl returns whether a flow control message should be sent.
+// If so, it updates the flow values to speed up or slow down the publisher if needed.
+// Lock should be held.
+func (b *batchGroup) fastBatchUpdateFlowControl(mset *stream, reply string, batches *batching) {
+	var first bool
+	for b.pseq >= b.fseq+b.ackMessages {
+		b.fseq += b.ackMessages
+
+		// If we need to send a flow control message, we'll recalculate the flow value once.
+		if !first {
+			first = true
+
 			// TODO(mvv): fast ingest's dynamic flow value improvements?
 			//  This is currently just a simple value to have a working version. Should take average
 			//  message sizes into account and compare how much this client is contributing to the
@@ -167,19 +190,16 @@ func (batches *batching) fastBatchRegisterSequences(batchId string, batchSeq, st
 				if b.ackMessages > maxAckMessages {
 					b.ackMessages = maxAckMessages
 				}
-				b.fseq = batchSeq
 			} else if b.ackMessages > maxAckMessages {
 				// Slow down.
 				b.ackMessages /= 2
 				if b.ackMessages <= maxAckMessages {
 					b.ackMessages = maxAckMessages
 				}
-				b.fseq = batchSeq
 			}
 		}
-		return b, flowRespond, _EMPTY_
+		b.fastBatchFlowControl(b.fseq, mset, reply)
 	}
-	return nil, false, _EMPTY_
 }
 
 // fastBatchFlowControl sends a fast batch flow control message for the current highest sequence.
@@ -197,6 +217,8 @@ func (b *batchGroup) fastBatchFlowControl(batchSeq uint64, mset *stream, reply s
 // after the last message has been persisted.
 // Lock should be held.
 func (batches *batching) fastBatchCommit(b *batchGroup, batchId string, mset *stream, reply string) {
+	// Mark that this batch commits.
+	b.commit = true
 	// If the whole batch has been persisted, we can respond with the PubAck now.
 	if b.lseq == b.pseq {
 		b.cleanupLocked(batchId, batches)
@@ -212,8 +234,6 @@ func (batches *batching) fastBatchCommit(b *batchGroup, batchId string, mset *st
 	// Otherwise, we need to wait and the PubAck will be sent when the last message is persisted.
 	// The batch will be cleaned up then, so stop the timer.
 	b.timer.Stop()
-	// And, need to store the reply for later for the PubAck.
-	b.reply = reply
 }
 
 // setupCleanupTimer sets up a timer to clean up the batch after a timeout.

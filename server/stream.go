@@ -6206,20 +6206,12 @@ func (mset *stream) processJetStreamMsgWithBatch(subject, reply string, hdr, msg
 		if batchId != _EMPTY_ && !batchAtomic && mset.batches != nil {
 			batches := mset.batches
 			batches.mu.Lock()
-			b, flowRespond, commitReply := batches.fastBatchRegisterSequences(batchId, batchSeq, mset.lseq)
-			if !flowRespond {
+			commit := batches.fastBatchRegisterSequences(mset, reply, batchId, batchSeq, mset.lseq)
+			batches.mu.Unlock()
+			if !commit {
 				reply = _EMPTY_
 				canRespond = false
 			}
-			if commitReply != _EMPTY_ {
-				reply = commitReply
-				canRespond = doAck && len(reply) > 0 && isLeader
-			} else if canRespond && b != nil {
-				// If not committing, we need to send a flow control message instead.
-				canRespond = false
-				b.fastBatchFlowControl(batchSeq, mset, reply)
-			}
-			batches.mu.Unlock()
 		}
 		if canRespond {
 			response = append(pubAck, strconv.FormatUint(mset.lseq, 10)...)
@@ -6403,20 +6395,12 @@ func (mset *stream) processJetStreamMsgWithBatch(subject, reply string, hdr, msg
 	if batchId != _EMPTY_ && !batchAtomic && mset.batches != nil {
 		batches := mset.batches
 		batches.mu.Lock()
-		b, flowRespond, commitReply := batches.fastBatchRegisterSequences(batchId, batchSeq, mset.lseq)
-		if !flowRespond {
+		commit := batches.fastBatchRegisterSequences(mset, reply, batchId, batchSeq, mset.lseq)
+		batches.mu.Unlock()
+		if !commit {
 			reply = _EMPTY_
 			canRespond = false
 		}
-		if commitReply != _EMPTY_ {
-			reply = commitReply
-			canRespond = doAck && len(reply) > 0 && isLeader
-		} else if canRespond && b != nil {
-			// If not committing, we need to send a flow control message instead.
-			canRespond = false
-			b.fastBatchFlowControl(batchSeq, mset, reply)
-		}
-		batches.mu.Unlock()
 	}
 
 	// Send response here.
@@ -6978,7 +6962,6 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 			return nil
 		}
 	}
-	batches.mu.Unlock()
 
 	// The first message in the batch responds with the settings used for flow control.
 	if batch.seq == 1 && canRespond && !batch.commit {
@@ -6995,13 +6978,59 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 		lseq = recalculateClusteredSeq(mset)
 	}
 
-	var err error
+	var (
+		dseq   uint64
+		apiErr *ApiError
+		err    error
+	)
 	diff := &batchStagedDiff{}
-	if hdr, msg, _, _, err = checkMsgHeadersPreClusteredProposal(diff, mset, subject, hdr, msg, false, name, jsa, allowRollup, denyPurge, allowTTL, allowMsgCounter, allowMsgSchedules, discard, discardNewPer, maxMsgSize, maxMsgs, maxMsgsPer, maxBytes); err != nil {
+	if hdr, msg, dseq, apiErr, err = checkMsgHeadersPreClusteredProposal(diff, mset, subject, hdr, msg, false, name, jsa, allowRollup, denyPurge, allowTTL, allowMsgCounter, allowMsgSchedules, discard, discardNewPer, maxMsgSize, maxMsgs, maxMsgsPer, maxBytes); err != nil {
 		mset.clMu.Unlock()
+		// If the batch commits and errored, we can maybe send the PubAck now.
+		if batch.commit {
+			// If we have pending, we can't send the PubAck now.
+			if b.pending > 0 {
+				// FIXME(mvv): register error if not duplicate
+				batches.mu.Unlock()
+				return err
+			}
+			b.cleanupLocked(batch.id, batches)
+			batches.mu.Unlock()
+			if err == errMsgIdDuplicate && dseq > 0 {
+				var buf [256]byte
+				pubAck := append(buf[:0], mset.pubAck...)
+				pubAck = append(pubAck, strconv.FormatUint(dseq, 10)...)
+				pubAck = append(pubAck, fmt.Sprintf(",\"duplicate\": true,\"batch\":%q,\"count\":%d}", batch.id, batch.seq)...)
+				outq.sendMsg(reply, pubAck)
+				return err
+			}
+			if canRespond {
+				var resp = &JSPubAckResponse{PubAck: &PubAck{Stream: name}}
+				resp.Error = apiErr
+				response, _ := json.Marshal(resp)
+				outq.sendMsg(reply, response)
+			}
+			return err
+		}
+
+		// If the message is a duplicate, and we have no pending messages, we should check if we need to
+		// send the flow control message here.
+		if err == errMsgIdDuplicate {
+			if b.pending == 0 {
+				b.pseq = batch.seq
+				b.fastBatchUpdateFlowControl(mset, reply, batches)
+			}
+			// Otherwise, just skip.
+			batches.mu.Unlock()
+			return err
+		}
+
 		// FIXME(mvv): errors need to be handled for fast batch publish, return both a success PubAck and error?
+		batches.mu.Unlock()
 		return err
 	}
+	b.pending++
+	batches.mu.Unlock()
 	if !isClustered {
 		mset.clMu.Unlock()
 		return mset.processJetStreamMsgWithBatch(subject, reply, hdr, msg, 0, 0, mt, false, true, batch)
