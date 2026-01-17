@@ -284,7 +284,7 @@ type BatchFlowAck struct {
 	// If "gap: fail" this means the messages up to CurrentSequence were persisted.
 	CurrentSequence uint64 `json:"seq,omitempty"`
 	// AckMessages indicates acknowledgements will be sent every N messages.
-	AckMessages uint64 `json:"ack_msgs,omitempty"`
+	AckMessages uint16 `json:"ack_msgs,omitempty"`
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -4550,18 +4550,17 @@ func (mset *stream) unsubscribeToStream(stopping, shuttingDown bool) error {
 func (mset *stream) deleteInflightBatches(shuttingDown bool) {
 	if mset.batches != nil {
 		mset.batches.mu.Lock()
-		clearBatches := func(group map[string]*batchGroup) {
-			for batchId, b := range group {
-				// If shutting down, do fixup during startup. In-memory batches don't require manual cleanup.
-				if shuttingDown {
-					b.stopLocked()
-				} else {
-					b.cleanupLocked(batchId, mset.batches)
-				}
+		for batchId, ab := range mset.batches.atomic {
+			// If shutting down, do fixup during startup. In-memory batches don't require manual cleanup.
+			if shuttingDown {
+				ab.stopLocked()
+			} else {
+				ab.cleanupLocked(batchId, mset.batches)
 			}
 		}
-		clearBatches(mset.batches.atomic)
-		clearBatches(mset.batches.fast)
+		for batchId, fb := range mset.batches.fast {
+			fb.cleanupLocked(batchId, mset.batches)
+		}
 		mset.batches.mu.Unlock()
 		mset.batches = nil
 	}
@@ -4975,7 +4974,7 @@ func getBatchId(hdr []byte) string {
 type FastBatch struct {
 	id        string
 	seq       uint64
-	flow      uint64
+	flow      uint16
 	gapOk     bool
 	commit    bool
 	commitEob bool
@@ -5075,8 +5074,10 @@ func getFastBatch(reply string) (*FastBatch, bool) {
 		a := parseInt64(stringToBytes(reply[o+1 : p]))
 		if a <= 0 {
 			a = 10
+		} else if a > math.MaxUint16 {
+			a = math.MaxUint16
 		}
-		b.flow = uint64(a)
+		b.flow = uint16(a)
 		p = o
 	}
 	// Batch id.
@@ -6568,14 +6569,14 @@ func (mset *stream) processJetStreamAtomicBatchMsg(batchId, subject, reply strin
 		}
 
 		var err error
-		b, err = batches.newAtomicBatchGroup(mset, batchId)
+		b, err = batches.newAtomicBatch(mset, batchId)
 		if err != nil {
 			globalInflightBatches.Add(-1)
 			batches.mu.Unlock()
 			return respondIncompleteBatch()
 		}
 		if batches.atomic == nil {
-			batches.atomic = make(map[string]*batchGroup, 1)
+			batches.atomic = make(map[string]*atomicBatch, 1)
 		}
 		batches.atomic[batchId] = b
 	}
@@ -6905,9 +6906,9 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 		}
 		// We'll need a copy as we'll use it as a key and later for cleanup.
 		batchId := copyString(batch.id)
-		b = batches.newFastBatchGroup(mset, batchId, batch.gapOk, batch.flow)
+		b = batches.newFastBatch(mset, batchId, batch.gapOk, batch.flow)
 		if batches.fast == nil {
-			batches.fast = make(map[string]*batchGroup, 1)
+			batches.fast = make(map[string]*fastBatch, 1)
 		}
 		batches.fast[batchId] = b
 	}
@@ -7018,7 +7019,7 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 		if err == errMsgIdDuplicate {
 			if b.pending == 0 {
 				b.pseq = batch.seq
-				b.fastBatchUpdateFlowControl(mset, reply, batches)
+				b.checkFlowControl(mset, reply, batches)
 			}
 			// Otherwise, just skip.
 			batches.mu.Unlock()

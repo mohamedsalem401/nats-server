@@ -1604,7 +1604,7 @@ func TestJetStreamAtomicBatchPublishSingleServerRecovery(t *testing.T) {
 	mset.batches = batches
 	mset.mu.Unlock()
 	batches.mu.Lock()
-	b, err := batches.newAtomicBatchGroup(mset, "uuid")
+	b, err := batches.newAtomicBatch(mset, "uuid")
 	if err != nil {
 		batches.mu.Unlock()
 		require_NoError(t, err)
@@ -1686,7 +1686,7 @@ func TestJetStreamAtomicBatchPublishSingleServerRecoveryCommitEob(t *testing.T) 
 	mset.batches = batches
 	mset.mu.Unlock()
 	batches.mu.Lock()
-	b, err := batches.newAtomicBatchGroup(mset, "uuid")
+	b, err := batches.newAtomicBatch(mset, "uuid")
 	if err != nil {
 		batches.mu.Unlock()
 		require_NoError(t, err)
@@ -2926,7 +2926,7 @@ func TestJetStreamAtomicBatchPublishCommitUnsupported(t *testing.T) {
 	require_Len(t, len(sliceHeader(JSRequiredApiLevel, sm.Header)), 0)
 }
 
-func generateFastBatchReply(inbox string, batchId string, batchSeq uint64, flow uint64, gap string, op int) string {
+func generateFastBatchReply(inbox string, batchId string, batchSeq uint64, flow uint16, gap string, op int) string {
 	return fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, flow, gap, batchSeq, op)
 }
 
@@ -3464,7 +3464,7 @@ func TestJetStreamFastBatchPublishDuplicates(t *testing.T) {
 		require_Len(t, fastBatches, 0)
 
 		// Flow setting so we get one flow control message below.
-		flow := uint64(3)
+		flow := uint16(3)
 
 		// Publish a batch of N messages that are all duplicates, we expect
 		// to receive both a flow control message and pub ack.
@@ -3488,7 +3488,7 @@ func TestJetStreamFastBatchPublishDuplicates(t *testing.T) {
 			}
 
 			// Expect one flow control message for this batch.
-			if seq%flow == 0 {
+			if seq%uint64(flow) == 0 {
 				rmsg, err = sub.NextMsg(time.Second)
 				require_NoError(t, err)
 				batchFlowAck = BatchFlowAck{}
@@ -3588,15 +3588,14 @@ func TestJetStreamFastBatchPublishDuplicatesCluster(t *testing.T) {
 	batches.fastBatchRegisterSequences(mset, reply, "uuid", 2, 2)
 	batches.mu.Unlock()
 
-	// We now expect to receive two flow control messages.
-	for _, cseq := range []uint64{4, 8} {
-		rmsg, err = sub.NextMsg(time.Second)
-		require_NoError(t, err)
-		batchFlowAck = BatchFlowAck{}
-		require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
-		require_Equal(t, batchFlowAck.AckMessages, 4)
-		require_Equal(t, batchFlowAck.CurrentSequence, cseq)
-	}
+	// Normally we'd receive two flow control messages, but since both were triggered due to
+	// the above process finishing, we only send one out to save bandwidth.
+	rmsg, err = sub.NextMsg(time.Second)
+	require_NoError(t, err)
+	batchFlowAck = BatchFlowAck{}
+	require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
+	require_Equal(t, batchFlowAck.AckMessages, 4)
+	require_Equal(t, batchFlowAck.CurrentSequence, 8)
 
 	// Now commit the batch (but this message is also a duplicate).
 	m.Reply = generateFastBatchReply(inbox, "uuid", 9, 0, FastBatchGapFail, FastBatchOpCommit)
