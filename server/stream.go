@@ -4584,6 +4584,7 @@ func (mset *stream) deleteFastBatches() {
 			b.cleanupLocked(batchId, mset.batches)
 		}
 		mset.batches.fast = nil
+		mset.batches.err = nil
 		mset.batches.mu.Unlock()
 	}
 }
@@ -6474,7 +6475,7 @@ func (mset *stream) processJetStreamAtomicBatchMsg(batchId, subject, reply strin
 	respondError := func(apiErr *ApiError) error {
 		if canRespond {
 			buf, _ := json.Marshal(&JSPubAckResponse{PubAck: &PubAck{Stream: name}, Error: apiErr})
-			outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, nil, buf, nil, 0))
+			outq.sendMsg(reply, buf)
 		}
 		return apiErr
 	}
@@ -6656,7 +6657,7 @@ func (mset *stream) processJetStreamAtomicBatchMsg(batchId, subject, reply strin
 		batches.mu.Unlock()
 		// Send empty ack to let them know we've persisted the data prior to commit.
 		if canRespond {
-			outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, nil, nil, nil, 0))
+			outq.sendMsg(reply, nil)
 		}
 		return nil
 	}
@@ -6849,7 +6850,7 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 	respondError := func(apiErr *ApiError) error {
 		if canRespond {
 			buf, _ := json.Marshal(&JSPubAckResponse{PubAck: &PubAck{Stream: name}, Error: apiErr})
-			outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, nil, buf, nil, 0))
+			outq.sendMsg(reply, buf)
 		}
 		return apiErr
 	}
@@ -6923,6 +6924,13 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 		}
 		batches.fast[batchId] = b
 	}
+	// If the batch is committing, due to an error, we can't add more messages.
+	// We simply skip, since the client will be waiting for the PubAck.
+	if b.commit {
+		// MUST NOT clean up, that will happen when the commit completes.
+		batches.mu.Unlock()
+		return
+	}
 
 	// The required API level can have the batch be rejected. But the header is always removed.
 	if len(sliceHeader(JSRequiredApiLevel, hdr)) != 0 {
@@ -6976,7 +6984,7 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 	}
 
 	// The first message in the batch responds with the settings used for flow control.
-	// If committing immediately, we only send the pub ack.
+	// If committing immediately, we only send the PubAck.
 	if batch.seq == 1 && canRespond && !batch.commit {
 		buf, _ := json.Marshal(&BatchFlowAck{AckMessages: b.ackMessages})
 		outq.sendMsg(reply, buf)
@@ -6999,36 +7007,10 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 	diff := &batchStagedDiff{}
 	if hdr, msg, dseq, apiErr, err = checkMsgHeadersPreClusteredProposal(diff, mset, subject, hdr, msg, false, name, jsa, allowRollup, denyPurge, allowTTL, allowMsgCounter, allowMsgSchedules, discard, discardNewPer, maxMsgSize, maxMsgs, maxMsgsPer, maxBytes); err != nil {
 		mset.clMu.Unlock()
-		// If the batch commits and errored, we can maybe send the PubAck now.
-		if batch.commit {
-			// If we have pending, we can't send the PubAck now.
-			if b.pending > 0 {
-				// FIXME(mvv): register error if not duplicate
-				batches.mu.Unlock()
-				return err
-			}
-			b.cleanupLocked(batch.id, batches)
-			batches.mu.Unlock()
-			if err == errMsgIdDuplicate && dseq > 0 {
-				var buf [256]byte
-				pubAck := append(buf[:0], mset.pubAck...)
-				pubAck = append(pubAck, strconv.FormatUint(dseq, 10)...)
-				pubAck = append(pubAck, fmt.Sprintf(",\"duplicate\": true,\"batch\":%q,\"count\":%d}", batch.id, batch.seq)...)
-				outq.sendMsg(reply, pubAck)
-				return err
-			}
-			if canRespond {
-				var resp = &JSPubAckResponse{PubAck: &PubAck{Stream: name}}
-				resp.Error = apiErr
-				response, _ := json.Marshal(resp)
-				outq.sendMsg(reply, response)
-			}
-			return err
-		}
 
 		// If the message is a duplicate, and we have no pending messages, we should check if we need to
 		// send the flow control message here.
-		if err == errMsgIdDuplicate {
+		if !batch.commit && err == errMsgIdDuplicate {
 			if b.pending == 0 {
 				b.pseq = batch.seq
 				b.checkFlowControl(mset, reply, batches)
@@ -7038,8 +7020,32 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 			return err
 		}
 
-		// FIXME(mvv): errors need to be handled for fast batch publish, return both a success PubAck and error?
+		var response []byte
+		if err == errMsgIdDuplicate && dseq > 0 {
+			var buf [256]byte
+			response = append(buf[:0], mset.pubAck...)
+			response = append(response, strconv.FormatUint(dseq, 10)...)
+			response = append(response, fmt.Sprintf(",\"duplicate\": true,\"batch\":%q,\"count\":%d}", batch.id, batch.seq)...)
+		} else {
+			response, _ = json.Marshal(&JSPubAckResponse{PubAck: &PubAck{Stream: name}, Error: apiErr})
+		}
+
+		// If we have pending, we can't send the PubAck now and need to store it for later.
+		if b.pending > 0 {
+			batches.fastBatchCommit(b, batch.id, mset, reply)
+			if batches.err == nil {
+				batches.err = make(map[string][]byte, 1)
+			}
+			// We'll need a copy as we'll use it as a key.
+			batchId := copyString(batch.id)
+			batches.err[batchId] = response
+			batches.mu.Unlock()
+			return err
+		}
+		// Return the error.
+		b.cleanupLocked(batch.id, batches)
 		batches.mu.Unlock()
+		outq.sendMsg(reply, response)
 		return err
 	}
 	b.pending++

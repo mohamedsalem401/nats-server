@@ -37,6 +37,9 @@ type batching struct {
 	mu     sync.Mutex
 	atomic map[string]*atomicBatch
 	fast   map[string]*fastBatch
+	// Error to include in the PubAck once the final message is persisted for fast batches.
+	// Explicitly store this outside the fastBatch struct to not bloat the struct size.
+	err map[string][]byte
 }
 
 type atomicBatch struct {
@@ -188,9 +191,16 @@ func (batches *batching) fastBatchRegisterSequences(mset *stream, reply string, 
 			b.pseq = batchSeq
 		}
 		// If the PubAck needs to be sent now as a result of a commit.
-		// Return the reply and clean up the batch now.
 		if b.lseq == b.pseq && b.commit {
 			b.cleanupLocked(batchId, batches)
+			// If we're committing with an error, we need to send the error ourselves.
+			if err, ok := batches.err[batchId]; ok {
+				if len(reply) > 0 {
+					mset.outq.sendMsg(reply, err)
+				}
+				delete(batches.err, batchId)
+				return false
+			}
 			return true
 		}
 		b.checkFlowControl(mset, reply, batches)
@@ -255,16 +265,16 @@ func (b *fastBatch) sendFlowControl(batchSeq uint64, mset *stream, reply string)
 // have already been persisted, a PubAck is sent immediately. Otherwise, it will be sent
 // after the last message has been persisted.
 // Lock should be held.
-func (batches *batching) fastBatchCommit(fb *fastBatch, batchId string, mset *stream, reply string) {
+func (batches *batching) fastBatchCommit(b *fastBatch, batchId string, mset *stream, reply string) {
 	// Mark that this batch commits.
-	fb.commit = true
+	b.commit = true
 	// If the whole batch has been persisted, we can respond with the PubAck now.
-	if fb.lseq == fb.pseq {
-		fb.cleanupLocked(batchId, batches)
+	if b.lseq == b.pseq {
+		b.cleanupLocked(batchId, batches)
 		var buf [256]byte
 		pubAck := append(buf[:0], mset.pubAck...)
-		response := append(pubAck, strconv.FormatUint(fb.sseq, 10)...)
-		response = append(response, fmt.Sprintf(",\"batch\":%q,\"count\":%d}", batchId, fb.lseq)...)
+		response := append(pubAck, strconv.FormatUint(b.sseq, 10)...)
+		response = append(response, fmt.Sprintf(",\"batch\":%q,\"count\":%d}", batchId, b.lseq)...)
 		if len(reply) > 0 {
 			mset.outq.sendMsg(reply, response)
 		}
@@ -272,7 +282,7 @@ func (batches *batching) fastBatchCommit(fb *fastBatch, batchId string, mset *st
 	}
 	// Otherwise, we need to wait and the PubAck will be sent when the last message is persisted.
 	// The batch will be cleaned up then, so stop the timer.
-	fb.timer.Stop()
+	b.timer.Stop()
 }
 
 // setupCleanupTimer sets up a timer to clean up the batch after a timeout.

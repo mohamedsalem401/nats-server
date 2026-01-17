@@ -3448,7 +3448,7 @@ func TestJetStreamFastBatchPublishDuplicates(t *testing.T) {
 		flow := uint16(3)
 
 		// Publish a batch of N messages that are all duplicates, we expect
-		// to receive both a flow control message and pub ack.
+		// to receive both a flow control message and PubAck.
 		for seq, batch := uint64(1), uint64(5); seq <= batch; seq++ {
 			if seq == batch {
 				m.Reply = generateFastBatchReply(inbox, "uuid", seq, flow, FastBatchGapFail, FastBatchOpCommit)
@@ -3586,4 +3586,62 @@ func TestJetStreamFastBatchPublishDuplicatesCluster(t *testing.T) {
 	require_True(t, pubAck.Duplicate)
 	require_Equal(t, pubAck.BatchId, "uuid")
 	require_Equal(t, pubAck.BatchSize, 9)
+}
+
+func TestJetStreamFastBatchPublishHeaderCheckError(t *testing.T) {
+	test := func(t *testing.T, replicas int) {
+		c := createJetStreamClusterExplicit(t, "R3S", 3)
+		defer c.shutdown()
+
+		nc := clientConnectToServer(t, c.randomServer())
+		defer nc.Close()
+
+		var batchFlowAck BatchFlowAck
+		var pubAck JSPubAckResponse
+
+		_, err := jsStreamCreate(t, nc, &StreamConfig{
+			Name:              "TEST",
+			Subjects:          []string{"foo"},
+			Storage:           FileStorage,
+			Replicas:          replicas,
+			AllowBatchPublish: true,
+		})
+		require_NoError(t, err)
+
+		inbox := nats.NewInbox()
+		sub, err := nc.SubscribeSync(fmt.Sprintf("%s.>", inbox))
+		require_NoError(t, err)
+		defer sub.Drain()
+
+		// Send the first message.
+		m := nats.NewMsg("foo")
+		m.Reply = generateFastBatchReply(inbox, "uuid", 1, 0, FastBatchGapFail, FastBatchOpStart)
+		require_NoError(t, nc.PublishMsg(m))
+
+		// Add a header that will require returning an error.
+		m.Header.Set(JSExpectedLastSeq, "100")
+		m.Reply = generateFastBatchReply(inbox, "uuid", 2, 0, FastBatchGapFail, FastBatchOpAppend)
+		require_NoError(t, nc.PublishMsg(m))
+
+		// The first message triggered the initial flow control message.
+		rmsg, err := sub.NextMsg(time.Second)
+		require_NoError(t, err)
+		batchFlowAck = BatchFlowAck{}
+		require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
+		require_Equal(t, batchFlowAck.AckMessages, 10)
+
+		// The second message should fail due to the header check error.
+		rmsg, err = sub.NextMsg(time.Second)
+		require_NoError(t, err)
+		pubAck = JSPubAckResponse{}
+		require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
+		require_True(t, pubAck.Error != nil)
+		require_Equal(t, pubAck.Error.Error(), NewJSStreamWrongLastSequenceError(1).Error())
+	}
+
+	for _, replicas := range []int{1, 3} {
+		t.Run(fmt.Sprintf("R%d", replicas), func(t *testing.T) {
+			test(t, replicas)
+		})
+	}
 }
