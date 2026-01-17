@@ -2510,6 +2510,9 @@ func (mset *stream) updateWithAdvisory(config *StreamConfig, sendAdvisory bool, 
 	if !cfg.AllowBatchPublish {
 		mset.deleteFastBatches()
 	}
+	if !cfg.AllowAtomicPublish && !cfg.AllowBatchPublish {
+		mset.batches = nil
+	}
 
 	// Now update config and store's version of our config.
 	// Although we are under the stream write lock, we will also assign the new
@@ -4531,6 +4534,8 @@ func (mset *stream) unsubscribeToStream(stopping, shuttingDown bool) error {
 	}
 	// Clear batching state.
 	mset.deleteAtomicBatches(shuttingDown)
+	mset.deleteFastBatches()
+	mset.batches = nil
 
 	if stopping {
 		// In case we had a direct get subscriptions.
