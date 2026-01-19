@@ -3656,7 +3656,7 @@ func TestJetStreamFastBatchPublishDuplicatesEobCommit(t *testing.T) {
 }
 
 func TestJetStreamFastBatchPublishHeaderCheckError(t *testing.T) {
-	test := func(t *testing.T, replicas int) {
+	test := func(t *testing.T, replicas int, gapMode string) {
 		c := createJetStreamClusterExplicit(t, "R3S", 3)
 		defer c.shutdown()
 
@@ -3682,12 +3682,12 @@ func TestJetStreamFastBatchPublishHeaderCheckError(t *testing.T) {
 
 		// Send the first message.
 		m := nats.NewMsg("foo")
-		m.Reply = generateFastBatchReply(inbox, "uuid", 1, 0, FastBatchGapFail, FastBatchOpStart)
+		m.Reply = generateFastBatchReply(inbox, "uuid", 1, 0, gapMode, FastBatchOpStart)
 		require_NoError(t, nc.PublishMsg(m))
 
 		// Add a header that will require returning an error.
 		m.Header.Set(JSExpectedLastSeq, "100")
-		m.Reply = generateFastBatchReply(inbox, "uuid", 2, 0, FastBatchGapFail, FastBatchOpAppend)
+		m.Reply = generateFastBatchReply(inbox, "uuid", 2, 0, gapMode, FastBatchOpAppend)
 		require_NoError(t, nc.PublishMsg(m))
 
 		// The first message triggered the initial flow control message.
@@ -3697,18 +3697,48 @@ func TestJetStreamFastBatchPublishHeaderCheckError(t *testing.T) {
 		require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
 		require_Equal(t, batchFlowAck.AckMessages, 10)
 
-		// The second message should fail due to the header check error.
-		rmsg, err = sub.NextMsg(time.Second)
-		require_NoError(t, err)
-		pubAck = JSPubAckResponse{}
-		require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
-		require_True(t, pubAck.Error != nil)
-		require_Equal(t, pubAck.Error.Error(), NewJSStreamWrongLastSequenceError(1).Error())
+		switch gapMode {
+		case FastBatchGapFail:
+			// The second message should fail due to the header check error.
+			rmsg, err = sub.NextMsg(time.Second)
+			require_NoError(t, err)
+			pubAck = JSPubAckResponse{}
+			require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
+			require_True(t, pubAck.Error != nil)
+			require_Equal(t, pubAck.Error.Error(), NewJSStreamWrongLastSequenceError(1).Error())
+		case FastBatchGapOk:
+			// The second message should NOT fail due to the header check error, since we're OK on gaps.
+			// But it should report about this error on that sequence.
+			rmsg, err = sub.NextMsg(time.Second)
+			require_NoError(t, err)
+			batchFlowAck = BatchFlowAck{}
+			require_NoError(t, json.Unmarshal(rmsg.Data, &batchFlowAck))
+			require_Equal(t, batchFlowAck.CurrentSequence, 2)
+			require_True(t, batchFlowAck.Error != nil)
+			require_Equal(t, batchFlowAck.Error.Error(), NewJSStreamWrongLastSequenceError(1).Error())
+
+			// Commit the batch.
+			m.Header.Del(JSExpectedLastSeq)
+			m.Reply = generateFastBatchReply(inbox, "uuid", 3, 0, gapMode, FastBatchOpCommitEob)
+			require_NoError(t, nc.PublishMsg(m))
+			rmsg, err = sub.NextMsg(time.Second)
+			require_NoError(t, err)
+			pubAck = JSPubAckResponse{}
+			require_NoError(t, json.Unmarshal(rmsg.Data, &pubAck))
+			require_True(t, pubAck.Error == nil)
+			require_Equal(t, pubAck.Sequence, 1)
+			require_Equal(t, pubAck.BatchId, "uuid")
+			require_Equal(t, pubAck.BatchSize, 2)
+		default:
+			t.Fatalf("Unexpected gap mode: %q", gapMode)
+		}
 	}
 
 	for _, replicas := range []int{1, 3} {
-		t.Run(fmt.Sprintf("R%d", replicas), func(t *testing.T) {
-			test(t, replicas)
-		})
+		for _, gapMode := range []string{FastBatchGapFail, FastBatchGapOk} {
+			t.Run(fmt.Sprintf("R%d/%s", replicas, gapMode), func(t *testing.T) {
+				test(t, replicas, gapMode)
+			})
+		}
 	}
 }

@@ -282,9 +282,12 @@ type BatchFlowAck struct {
 	LastSequence uint64 `json:"last_seq,omitempty"`
 	// CurrentSequence is the sequence of the message that triggered the ack.
 	// If "gap: fail" this means the messages up to CurrentSequence were persisted.
+	// If "gap: ok" and Error is set, this means this message was NOT persisted and had an error instead.
 	CurrentSequence uint64 `json:"seq,omitempty"`
 	// AckMessages indicates acknowledgements will be sent every N messages.
 	AckMessages uint16 `json:"ack_msgs,omitempty"`
+	// Error is used for "gap:ok" to return the error for the CurrentSequence.
+	Error *ApiError `json:"error,omitempty"`
 }
 
 // StreamInfo shows config and current state for this stream.
@@ -6977,10 +6980,14 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 		if batch.commitEob {
 			// Revert, since we incremented for the gap check.
 			b.lseq--
+			// If there is none pending, correct the persisted sequence as we need to commit below.
+			if b.pending == 0 {
+				b.pseq = b.lseq
+			}
 		}
 		// We'll try to immediately send a PubAck if we can.
 		// Only possible if EOB is used and the last message was already persisted
-		// Otherwise, this sets up the commit reply for the last message we're about to propose.
+		// Otherwise, this sets up the commit for the last message we're about to propose.
 		batches.fastBatchCommit(b, batch.id, mset, reply)
 		if batch.commitEob {
 			batches.mu.Unlock()
@@ -7021,6 +7028,14 @@ func (mset *stream) processJetStreamFastBatchMsg(batch *FastBatch, subject, repl
 				b.checkFlowControl(mset, reply, batches)
 			}
 			// Otherwise, just skip.
+			batches.mu.Unlock()
+			return err
+		}
+
+		// If gaps are okay, we just return the error to them but allow to continue.
+		if !batch.commit && batch.gapOk {
+			buf, _ := json.Marshal(&BatchFlowAck{CurrentSequence: batch.seq, Error: apiErr})
+			outq.sendMsg(reply, buf)
 			batches.mu.Unlock()
 			return err
 		}
